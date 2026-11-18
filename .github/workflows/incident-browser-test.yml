@@ -1,0 +1,160 @@
+name: Incident-guided browser test
+
+on:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  avenue-road:
+    name: Avenue Rd incident scenario
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      startsWith(github.head_ref, 'demo/')
+    # A standard GitHub-hosted image; every job starts on a fresh VM.
+    # Pin 24.04 because the Aurora runner's Playwright 1.55 browser build does
+    # not support the Ubuntu 26.04 image currently behind ubuntu-latest.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out the exact PR head
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: road-board
+          persist-credentials: false
+
+      - name: Check out the pinned Aurora browser runner
+        uses: actions/checkout@v4
+        with:
+          repository: TonyCai1/aurora
+          ref: b78556835854c8b567951c8c38627b07830d737d
+          path: aurora
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            road-board/requirements.txt
+            aurora/server/browser_testing/requirements-ci.txt
+
+      - name: Install the app and browser runner
+        run: |
+          python -m pip install -r road-board/requirements.txt
+          python -m pip install -r aurora/server/browser_testing/requirements-ci.txt
+          python -m playwright install chromium
+
+      - name: Start the road board without agent credentials
+        working-directory: road-board
+        run: |
+          nohup python -m flask --app app run --host 127.0.0.1 --port 5000 \
+            >"$RUNNER_TEMP/road-board.log" 2>&1 &
+          echo "$!" >"$RUNNER_TEMP/road-board.pid"
+
+      - name: Wait for the preview
+        run: |
+          for attempt in {1..30}; do
+            if curl --fail --silent --show-error http://127.0.0.1:5000/ >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/road-board.log"
+          exit 1
+
+      - name: Collect browser evidence
+        id: browser-test
+        continue-on-error: true
+        working-directory: aurora/server
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          python -m browser_testing run \
+            --scenario browser_testing/fixtures/avenue-rd-scenario.json \
+            --preview-url http://127.0.0.1:5000/ \
+            --commit "${{ github.event.pull_request.head.sha }}" \
+            --output-dir "$GITHUB_WORKSPACE/evidence" \
+            --model gpt-5-mini
+
+      - name: Publish the observed result
+        if: always()
+        shell: bash
+        run: |
+          result="$GITHUB_WORKSPACE/evidence/browser-result.json"
+          if [[ ! -f "$result" ]]; then
+            {
+              echo "### Incident-guided browser test"
+              echo
+              echo "**Verdict: inconclusive** — the runner did not produce a JSON result."
+              echo
+              echo "Tested commit: \`${{ github.event.pull_request.head.sha }}\`"
+            } >>"$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          verdict="$(jq -r '.verdict' "$result")"
+          reason="$(jq -r '.reason' "$result")"
+          scenario_hash="$(jq -r '.scenarioHash' "$result")"
+          tested_commit="$(jq -r '.testedCommit' "$result")"
+          {
+            echo "### Incident-guided browser test"
+            echo
+            echo "**Verdict: $verdict** — $reason"
+            echo
+            echo "Tested commit: \`$tested_commit\`  "
+            echo "Frozen scenario: \`$scenario_hash\`"
+            echo
+            echo "| Row | Expected badge | Observed badge |"
+            echo "| --- | --- | --- |"
+            jq -r '.checks[] | "| \(.rowText) | \(.expectedBadge) | \(.observedBadge // "—") |"' "$result"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: avenue-road-browser-evidence-${{ github.event.pull_request.head.sha }}
+          path: evidence/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Stop the preview
+        if: always()
+        run: |
+          if [[ -f "$RUNNER_TEMP/road-board.pid" ]]; then
+            kill "$(cat "$RUNNER_TEMP/road-board.pid")" 2>/dev/null || true
+          fi
+
+      - name: Set the PR check result
+        if: always()
+        shell: bash
+        run: |
+          result="$GITHUB_WORKSPACE/evidence/browser-result.json"
+          if [[ ! -f "$result" ]]; then
+            echo "::error title=Browser run inconclusive::The runner did not produce browser-result.json."
+            exit 1
+          fi
+
+          verdict="$(jq -r '.verdict' "$result")"
+          reason="$(jq -r '.reason' "$result")"
+          case "$verdict" in
+            passed)
+              echo "Browser scenario passed."
+              ;;
+            failed)
+              echo "::error title=Browser mismatch::$reason"
+              exit 1
+              ;;
+            *)
+              echo "::error title=Browser run inconclusive::$reason"
+              exit 1
+              ;;
+          esac

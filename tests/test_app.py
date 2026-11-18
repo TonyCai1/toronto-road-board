@@ -28,9 +28,10 @@ class RoadBoardTestCase(unittest.TestCase):
         self.assertIn("Avenue Rd", page)
         self.assertIn("Jun 10, 2024", page)
         self.assertIn("Dec 31, 2026", page)
-        self.assertEqual(page.count('class="badge">Road closed</span>'), 2)
+        self.assertEqual(page.count('class="badge">Road closed</span>'), 1)
+        self.assertEqual(page.count('class="badge">Lane restriction</span>'), 1)
 
-    def test_v1_replays_known_lane_restriction_mislabel(self):
+    def test_cards_show_the_saved_restriction_scope(self):
         page = self.client.get("/").get_data(as_text=True)
         lane_card = page.split('data-object-id="2088"', 1)[1].split("</article>", 1)[0]
         closure_card = page.split('data-object-id="2099"', 1)[1].split("</article>", 1)[0]
@@ -39,9 +40,29 @@ class RoadBoardTestCase(unittest.TestCase):
         self.assertIn("Road closed", closure_card)
         self.assertIn("Full closure", closure_card)
 
-        # Intentional V1 incident: a blocked curb lane is mislabeled as a road closure.
-        self.assertIn("Road closed", lane_card)
+        self.assertIn("Lane restriction", lane_card)
+        self.assertNotIn("Road closed", lane_card)
         self.assertIn("lane blocked", lane_card)
+
+    def test_badges_match_restriction_scope(self):
+        page = self.client.get("/").get_data(as_text=True)
+
+        def rendered_badge(object_id: int) -> str:
+            card = page.split(f'data-object-id="{object_id}"', 1)[1].split(
+                "</article>", 1
+            )[0]
+            return card.split('class="badge">', 1)[1].split("</span>", 1)[0]
+
+        actual_badges = {
+            "Avenue Rd (OBJECTID 2088)": rendered_badge(2088),
+            "Queen St E (OBJECTID 2099)": rendered_badge(2099),
+        }
+        expected_badges = {
+            "Avenue Rd (OBJECTID 2088)": "Lane restriction",
+            "Queen St E (OBJECTID 2099)": "Road closed",
+        }
+
+        self.assertEqual(actual_badges, expected_badges)
 
 
 if __name__ == "__main__":

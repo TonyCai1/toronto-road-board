@@ -27,6 +27,11 @@ def load_restrictions() -> list[dict]:
         restriction["location"] = (
             f'{restriction["FROM_ROAD"]} to {restriction["TO_ROAD"]}'
         )
+        restriction["badge"] = (
+            "Road closed"
+            if "full closure" in restriction["DESCRIPTION"].lower()
+            else "Lane restriction"
+        )
         restrictions.append(restriction)
 
     return restrictions
@@ -37,8 +42,6 @@ def create_app() -> Flask:
 
     @app.get("/")
     def index():
-        # V1 intentionally applies one badge to every restriction. This is the
-        # behavior captured for the first Aurora incident replay.
         return render_template("index.html", restrictions=load_restrictions())
 
     return app
